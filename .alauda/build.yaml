@@ -1,0 +1,82 @@
+apiVersion: builds.katanomi.dev/v1alpha1
+kind: Build
+spec:
+  runTemplate:
+    spec:
+      workspaces:
+      - name: source
+        volumeClaimTemplate:
+          spec:
+            accessModes:
+              - ReadWriteMany
+            resources:
+              requests:
+                storage: 1024Mi
+  workspaces:
+    - description: >
+        This workspace is shared among all the pipeline tasks to read/write
+        common resources
+      name: source
+  tasks:
+  - name: build
+    taskSpec:
+        workspaces:
+          - name: source
+            workspace: source
+        steps:
+        - workingDir: "$(workspaces.source.path)"
+          image: registry.alauda.cn:60080/devops/builder-tools:ubuntu-v3.10-5-g3d444da
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: "2"
+              memory: "2G"
+            limits:
+              cpu: "6"
+              memory: "4G"
+          script: |
+            #!/bin/bash
+            set -ex 
+            docker buildx version
+  
+            # copy docker config
+  
+            /katanomi/bin/ktn-settings copy docker --always-match=true ~/.docker/config.json 2>/dev/null
+  
+            mkdir -p /opt/kubernetes /root/.docker/buildx/instances
+  
+            echo "downloading configuration from nexus..."
+  
+            curl -sSL --retry 3 https://build-nexus.alauda.cn/repository/alauda/buildx/kube_config.yaml -o /opt/kubernetes/admin.conf
+  
+            curl -sSL --retry 3 https://build-nexus.alauda.cn/repository/alauda/buildx/builder-kubernetes.json -o /root/.docker/buildx/instances/builder
+  
+            ls 
+            apt install make
+            docker buildx ls
+            make image
+  finally:
+  # Release tag
+  - name: release-tag
+    when:
+      # only during releases
+      - input: "$(build.git.versionPhase)"
+        operator: in
+        values: ["custom", "ga"]
+      # all tasks must succeed
+      - input: $(tasks.status)
+        operator: in
+        values: ["Succeeded", "Completed"]
+    timeout: 30m
+    retries: 1
+    taskRef:
+      kind: ClusterTask
+      name: alauda-release-tag
+    workspaces:
+      - name: source
+        workspace: source
+    params:
+      - name: verbose
+        value: "false"
+      - name: version
+        value: $(build.git.version.docker)
